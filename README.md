@@ -35,7 +35,7 @@ python sa-flonet.py --gpt_correction=True --dropout=0.0 --lr=0.0001 --gpt-lr=0.2
 --inference=1 --max_length=60 --model=gpt2 --max_history=900 --num-epochs=0 --history_length=600 --emb-size=200 --hidden-size=600 --personality_length=200 \
 >outputs/SAFlonetUFloTestEval.out 2>outputs/SAFlonetUFloTestEval.err
 ```
-6. For success rate, use the evaluation script success_rate.py
+6. The metrics are printed at the end of the output files. We use average top perplexity (second to last PPL score) for our perplexity results.
 
 # SA-FloNet outputs
 
