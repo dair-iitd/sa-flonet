@@ -104,14 +104,6 @@ def parge_args():
     parser.add_argument("--sample_turns", type=int, default=10, help="number of time to sample for next token (repeated sampling if token is a special token)")#TODO
     parser.add_argument("--save_metric", type=str, default='BLEU', help="nll or BLEU")#TODO
 
-    parser.add_argument("--t_alpha", type=float, default=0.4, help="Transition weight across all children for node2all")
-    parser.add_argument("--t_beta", type=float, default=0.5, help="Transition weight across all FAQs for node2all")
-    parser.add_argument("--s_alpha", type=float, default=0.4, help="Transition weight across all children for node2node")
-    parser.add_argument("--s_beta", type=float, default=0.5, help="Transition weight for self transition for node2node")
-
-    parser.add_argument("--classic", type=bool, default=False, help="Implementation without belief states")
-    parser.add_argument("--gpt_correction", type=bool, default=True, help="Corrects wrong belief in next step")
-
     parser.add_argument("--nli_folder", type=str, default='circa_and_full_DS_data_FT/', help="Selects finetune to use")
 
     args = parser.parse_args()
@@ -309,57 +301,32 @@ def dropout_entries(entries,pred_scores):
             entries[i]['utterances'][0]['history']=[]
     return entries
 
-def get_transition_matrix(data, startIdx):
+def success_rate(test_entries):
+    dialog_success = 0
 
-    flowchart_name = data.flowchart_names[startIdx]
+    dialog_list = []
 
-    if flowchart_name in transition_matrix_dict.keys():
-        return transition_matrix_dict[flowchart_name]
+    dialog = [] 
 
-    path_as_text = data.chart_data_dict[flowchart_name]['paths_text']
+    for i, entry in enumerate(test_entries):
+        if entry['GT index'] == -1:
+            dialog.append(entry)
+            dialog_list.append(dialog)
+            dialog = []
+        else:
+            dialog.append(entry)
 
-    alpha = args.t_alpha
-    beta = args.t_beta
-
-    faqs = 0
-    T = torch.zeros(len(path_as_text), len(path_as_text))
-    for i, txt in enumerate(path_as_text):
-        if i>0 and len(txt)==1:
-            faqs+=1
-
-    for i, row_text in enumerate(path_as_text):
-        children = []
-
-        if i == 0:
-            row_text = []
-
-        for j, col_text in enumerate(path_as_text):
-            # check if j is a child of i
-            if len(col_text) == len(row_text)+2:
-                match = True
-                for k, utt in enumerate(row_text): 
-                    if col_text[k] != utt:
-                        match = False
-                        break
-                if match:
-                    children.append(j)
-        
-        not_children_not_faqs = len(path_as_text) - len(children) - faqs
-
-        for j, col_text in enumerate(path_as_text):
-            if j in children:
-                T[i][j] = alpha/len(children)
-            elif j > 0 and len(col_text)==1:
-                T[i][j] = beta/faqs
+    for i, dialog in enumerate(dialog_list):
+        success = True
+        for j, entry in enumerate(dialog):
+            if(entry['GT index'] == -1):
+                break
             else:
-                T[i][j] = (1-alpha-beta)/not_children_not_faqs
+                success = success and (entry['ranked c(t) idxs'][0] == entry['GT index'])
+        if success:
+            dialog_success += 1
 
-    if args.cuda:
-        T = T.cuda()
-    
-    transition_matrix_dict[flowchart_name] = T
-
-    return T
+    return(dialog_success/len(dialog_list))
 
 def get_counts(data, startIdx):
     flowchart_name = data.flowchart_names[startIdx]
@@ -374,110 +341,6 @@ def get_counts(data, startIdx):
     counts_dict[flowchart_name] = (N, Nf)
     return (N, Nf)
 
-def node2node_tpm(data, startIdx):
-    flowchart_name = data.flowchart_names[startIdx]
-    if flowchart_name in node2node_tpm_dict.keys():
-        return node2node_tpm_dict[flowchart_name]
-    (N, Nf) = get_counts(data, startIdx)
-    
-    S = torch.zeros((N-Nf),(N-Nf))
-
-    alpha = args.s_alpha
-    beta = args.s_beta
-
-    path_as_text = data.chart_data_dict[flowchart_name]['paths_text']
-    path_as_text = path_as_text[0:N-Nf]
-
-    for i, row_text in enumerate(path_as_text):
-        children = []
-        alpha = args.s_alpha
-        beta = args.s_beta
-        if i == 0:
-            row_text = []
-
-        for j, col_text in enumerate(path_as_text):
-            # check if j is a child of i
-            if len(col_text) == len(row_text)+2:
-                match = True
-                for k, utt in enumerate(row_text): 
-                    if col_text[k] != utt:
-                        match = False
-                        break
-                if match:
-                    children.append(j)
-        
-        not_children_not_self = N - Nf - len(children) - 1
-
-        if len(children)==0:
-            alpha = 0
-
-        for j, col_text in enumerate(path_as_text):
-            if j in children:
-                S[i][j] = alpha/len(children)
-            elif i == j:
-                S[i][j] = beta
-            else:
-                S[i][j] = (1-alpha-beta)/not_children_not_self
-
-    if args.cuda:
-        S = S.cuda()
-    
-    node2node_tpm_dict[flowchart_name] = S
-
-    return S
-
-def node2all_tpm(data, startIdx):
-    flowchart_name = data.flowchart_names[startIdx]
-    if flowchart_name in node2all_tpm_dict.keys():
-        return node2all_tpm_dict[flowchart_name]
-    (N, Nf) = get_counts(data, startIdx)
-
-    T = torch.zeros((N-Nf),N)  
-
-    alpha = args.t_alpha # set to gamma, delta
-    beta = args.t_beta
-
-    path_as_text = data.chart_data_dict[flowchart_name]['paths_text']
-    fc_path_as_text = path_as_text[0:N-Nf]
-
-    for i, row_text in enumerate(fc_path_as_text):
-        children = []
-        alpha = args.t_alpha
-        beta = args.t_beta
-        if i == 0:
-            row_text = []
-
-        for j, col_text in enumerate(path_as_text):
-            # check if j is a child of i
-            if len(col_text) == len(row_text)+2:
-                match = True
-                for k, utt in enumerate(row_text): 
-                    if col_text[k] != utt:
-                        match = False
-                        break
-                if match:
-                    children.append(j)
-        
-        not_children_not_faqs = N - len(children) - Nf
-
-        if len(children) == 0:
-            beta = beta + alpha
-            alpha = 0
-
-        for j, col_text in enumerate(path_as_text):
-            if j in children:
-                T[i][j] = alpha/len(children)
-            elif j > 0 and len(col_text)==1:
-                T[i][j] = beta/Nf
-            else:
-                T[i][j] = (1-alpha-beta)/not_children_not_faqs
-
-    if args.cuda:
-        T = T.cuda()
-    
-    node2all_tpm_dict[flowchart_name] = T
-
-    return T
 
 def node2all_tpm_new(data, score_dict, startIdx, endIdx):
     fc = data.flowchart_names[startIdx]
@@ -550,25 +413,6 @@ def node2all_tpm_new(data, score_dict, startIdx, endIdx):
 
     return T
 
-
-def transfer_wt_matrix(data, startIdx, old_belief):
-    (N, Nf) = get_counts(data, startIdx)
-    U = torch.zeros(N, (N-Nf))
-
-    for i in range(N):
-        if i >= N-Nf:
-            for j in range(N-Nf):
-                U[i][j] = old_belief.detach().cpu()[j]
-        else:
-            for j in range(N-Nf):
-                if i == j:
-                    U[i][j] = 1    
-
-    if args.cuda:
-        U = U.cuda()
-    
-    return U
-
 def get_gt_index(chart_gt_response, chart_responses):
     gt_index = -1
     for i, response in enumerate(chart_responses):
@@ -591,114 +435,48 @@ def train(startIdx, endIdx, mask, dialog_idxs):
 
     scorer.train()
 
-    if args.gpt_correction:
-        (N, Nf) = get_counts(trnData, startIdx)
-        batch_entry = ProxyScoreBatch(trnData, glob, startIdx, endIdx)
     
-        contexts,  context_utterance_lengths, context_lengths  = torch.as_tensor(batch_entry.context).long(),  torch.as_tensor(batch_entry.context_utterance_lengths).long(),  torch.as_tensor(batch_entry.context_num_utterances).long()
-        paths,  path_utterance_lengths, path_lengths  = torch.as_tensor(batch_entry.path).long(),  torch.as_tensor(batch_entry.path_utterance_lengths).long(),  torch.as_tensor(batch_entry.path_num_utterances).long()
-        scores = torch.as_tensor(batch_entry.score,dtype=float)
-        responses, chart_responses = batch_entry.response_as_text, batch_entry.chart_response_as_text
-        gt_labels = batch_entry.gt_label
-        assert len(list(set(responses)))==1 #make sure the batch belongs to the same context-response pair
-
-        if args.cuda:
-            contexts,  context_utterance_lengths, context_lengths  = contexts.cuda(),  context_utterance_lengths.cuda(), context_lengths.cuda()
-            paths, path_utterance_lengths, path_lengths  = paths.cuda(),  path_utterance_lengths.cuda(), path_lengths.cuda()
-            scores = scores.cuda()
-        
-        pred_scores_ = scorer.get_scores(contexts,context_utterance_lengths,context_lengths,paths, path_utterance_lengths, path_lengths)
-        #convert to a format such that greater score=better
-    elif not args.classic:
-        (N, Nf) = get_counts(trnData, startIdx)
-
-        local_belief = torch.ones(N-Nf)
-        if args.cuda:
-            local_belief = local_belief.cuda()
-        local_belief[0] = 3
-        local_belief = local_belief/torch.sum(local_belief)
-
-        for idx, (start_i, end_i) in enumerate(dialog_idxs):
-            if start_i > startIdx:
-                break
-            batch_entry = ProxyScoreBatch(trnData, glob, start_i, end_i)
+    (N, Nf) = get_counts(trnData, startIdx)
+    batch_entry = ProxyScoreBatch(trnData, glob, startIdx, endIdx)
     
-            contexts,  context_utterance_lengths, context_lengths  = torch.as_tensor(batch_entry.context).long(),  torch.as_tensor(batch_entry.context_utterance_lengths).long(),  torch.as_tensor(batch_entry.context_num_utterances).long()
-            paths,  path_utterance_lengths, path_lengths  = torch.as_tensor(batch_entry.path).long(),  torch.as_tensor(batch_entry.path_utterance_lengths).long(),  torch.as_tensor(batch_entry.path_num_utterances).long()
-            scores = torch.as_tensor(batch_entry.score,dtype=float)
-            responses, chart_responses = batch_entry.response_as_text, batch_entry.chart_response_as_text
-            gt_labels = batch_entry.gt_label
-            assert len(list(set(responses)))==1 #make sure the batch belongs to the same context-response pair
+    contexts,  context_utterance_lengths, context_lengths  = torch.as_tensor(batch_entry.context).long(),  torch.as_tensor(batch_entry.context_utterance_lengths).long(),  torch.as_tensor(batch_entry.context_num_utterances).long()
+    paths,  path_utterance_lengths, path_lengths  = torch.as_tensor(batch_entry.path).long(),  torch.as_tensor(batch_entry.path_utterance_lengths).long(),  torch.as_tensor(batch_entry.path_num_utterances).long()
+    scores = torch.as_tensor(batch_entry.score,dtype=float)
+    responses, chart_responses = batch_entry.response_as_text, batch_entry.chart_response_as_text
+    gt_labels = batch_entry.gt_label
+    assert len(list(set(responses)))==1 #make sure the batch belongs to the same context-response pair
 
-            if args.cuda:
-                contexts,  context_utterance_lengths, context_lengths  = contexts.cuda(),  context_utterance_lengths.cuda(), context_lengths.cuda()
-                paths, path_utterance_lengths, path_lengths  = paths.cuda(),  path_utterance_lengths.cuda(), path_lengths.cuda()
-                scores = scores.cuda()
+    if args.cuda:
+        contexts,  context_utterance_lengths, context_lengths  = contexts.cuda(),  context_utterance_lengths.cuda(), context_lengths.cuda()
+        paths, path_utterance_lengths, path_lengths  = paths.cuda(),  path_utterance_lengths.cuda(), path_lengths.cuda()
+        scores = scores.cuda()
         
-            pred_scores_ = scorer.get_scores(contexts,context_utterance_lengths,context_lengths,paths, path_utterance_lengths, path_lengths)
-            #convert to a format such that greater score=better
-            p_ai = softmax(-pred_scores_)
-
-            if start_i < startIdx:
-                S = node2node_tpm(trnData, startIdx)
-                U = transfer_wt_matrix(trnData, startIdx, local_belief)
-                local_belief = (torch.matmul(torch.transpose(S, 0, 1), local_belief))*(torch.matmul(torch.transpose(U, 0, 1), p_ai))
-                local_belief = local_belief/torch.sum(local_belief)
-            else:
-                T = node2all_tpm(trnData, startIdx)
-                c_t = p_ai*(torch.matmul(torch.transpose(T,0,1), local_belief))
-                c_t = c_t/torch.sum(c_t)
-    else:
-        batch_entry = ProxyScoreBatch(trnData, glob, startIdx, endIdx)
-    
-        contexts,  context_utterance_lengths, context_lengths  = torch.as_tensor(batch_entry.context).long(),  torch.as_tensor(batch_entry.context_utterance_lengths).long(),  torch.as_tensor(batch_entry.context_num_utterances).long()
-        paths,  path_utterance_lengths, path_lengths  = torch.as_tensor(batch_entry.path).long(),  torch.as_tensor(batch_entry.path_utterance_lengths).long(),  torch.as_tensor(batch_entry.path_num_utterances).long()
-        scores = torch.as_tensor(batch_entry.score,dtype=float)
-        responses, chart_responses = batch_entry.response_as_text, batch_entry.chart_response_as_text
-        gt_labels = batch_entry.gt_label
-        assert len(list(set(responses)))==1 #make sure the batch belongs to the same context-response pair
-
-        if args.cuda:
-            contexts,  context_utterance_lengths, context_lengths  = contexts.cuda(),  context_utterance_lengths.cuda(), context_lengths.cuda()
-            paths, path_utterance_lengths, path_lengths  = paths.cuda(),  path_utterance_lengths.cuda(), path_lengths.cuda()
-            scores = scores.cuda()
-        
-        pred_scores_ = scorer.get_scores(contexts,context_utterance_lengths,context_lengths,paths, path_utterance_lengths, path_lengths)
-        #convert to a format such that greater score=better
-        p_ai = softmax(-pred_scores_)
-        c_t = p_ai
+    pred_scores_ = scorer.get_scores(contexts,context_utterance_lengths,context_lengths,paths, path_utterance_lengths, path_lengths)
+    #convert to a format such that greater score=better
 
 
     ##### NEW TOP K INDICES
     topk_idxs = None
     classic_topk_idxs = np.argsort(pred_scores_.detach().cpu().numpy())[:args.scorer_topk]
 
-    if args.gpt_correction:
-        if belief is None:
-            belief = torch.ones(N-Nf)
-            if args.cuda:
-                belief = belief.cuda()
-            belief[0] = 3
-            belief = belief/torch.sum(belief)
+    
+    if belief is None:
+        belief = torch.ones(N-Nf)
+        if args.cuda:
+            belief = belief.cuda()
+        belief[0] = 3
+        belief = belief/torch.sum(belief)
         
 
     p_ai = softmax(-pred_scores_)
     T = node2all_tpm_new(trnData, train_scores_dict, startIdx, endIdx)
     c_t = p_ai*(torch.matmul(torch.transpose(T,0,1), belief))
     c_t = c_t/torch.sum(c_t)
-    # S = node2node_tpm(trnData, startIdx)
-    # U = transfer_wt_matrix(trnData, startIdx, belief)
-    # belief = (torch.matmul(torch.transpose(S, 0, 1), belief))*(torch.matmul(torch.transpose(U, 0, 1), p_ai))
-    # belief = belief/torch.sum(belief)
 
     topk_idxs = np.argsort(c_t.detach().cpu().numpy())[::-1][:args.scorer_topk]
     topk_idxs = topk_idxs.copy()
     pred_scores = c_t[list(topk_idxs)]
     pred_scores = pred_scores/torch.sum(pred_scores) 
-
-    # topk_idxs = np.argsort(pred_scores_.detach().cpu().numpy())[:args.scorer_topk]#fetch top k
-    # pred_scores = pred_scores_[list(topk_idxs)]
-    # pred_scores = softmax(-pred_scores)   
 
     ##### NEW TOP K INDICES END
 
@@ -727,81 +505,49 @@ def train(startIdx, endIdx, mask, dialog_idxs):
     
     predicted_scores = (pred_scores).float().detach().cpu().numpy()
 
-    # if startIdx in trn_examples:
-    #     trn_examples_count[startIdx]+=1
-    #     if trn_examples_count[startIdx]%200 == 1:
-    #         print("---------------------------------------")
-    #         sys.stdout.flush()
-    #         print("Results for", startIdx, "at", trn_examples_count[startIdx])
-    #         sys.stdout.flush()
-    #         print("Retriever Results")
-    #         sys.stdout.flush()
-    #         if old_belief is not None:
-    #             print('B(t-1):', old_belief)
-    #             sys.stdout.flush()
-    #             print('p_eta(z|h):', p_ai)
-    #             sys.stdout.flush()
-    #             print('C(t):', c_t)
-    #             sys.stdout.flush()
-    #             # print('normalized B(t):',normalized_b_1)
-    #             # sys.stdout.flush()
-    #         print("Belief idxs path scores:", pred_scores_[list(topk_idxs)])
-    #         sys.stdout.flush()
-    #         print("Classic idxs path scores:", pred_scores_[list(classic_topk_idxs)])
-    #         sys.stdout.flush()
-    #         print("GPT Results")
-    #         sys.stdout.flush()
-    #         print("Correct Response:", responses[0])
-    #         sys.stdout.flush()
-    #         print("GPT Output: N/A, train")
-    #         sys.stdout.flush()
-    #         print("---------------------------------------")
-    #         sys.stdout.flush()
-
     if batch_entry.last_node[0] == True:
         belief = None
     else:
-        if args.gpt_correction:
+        
 
-            all_log_probs_list = []
+        all_log_probs_list = []
 
-            loop_count = N//5
-            last_loop_count = N%5
+        loop_count = N//5
+        last_loop_count = N%5
+        if loop_count > 0:
+            ranges = [i*5 for i in range(loop_count)]
 
-            if loop_count > 0:
-                ranges = [i*5 for i in range(loop_count)]
-
-                for range_begin in ranges:
-                    #GPT#########
-                    history = batch_entry.context_as_text[0]
-                    #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
-                    worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
-                    entries = make_gpt_input_json(history, responses[0], chart_responses[range_begin:range_begin+5], worst_response)
-                    gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
-                    gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
-                    gpt_loss_array2, (lm_loss_total,n_loss), gpt_loss2 = gpt_inference(gpt_data,gpt,args)
-
-                    all_log_probs_list.append(gpt_loss_array2)
-            
-            if last_loop_count > 0:
+            for range_begin in ranges:
                 #GPT#########
                 history = batch_entry.context_as_text[0]
                 #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
                 worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
-                entries = make_gpt_input_json(history, responses[0], chart_responses[-last_loop_count:], worst_response)
+                entries = make_gpt_input_json(history, responses[0], chart_responses[range_begin:range_begin+5], worst_response)
                 gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
                 gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
                 gpt_loss_array2, (lm_loss_total,n_loss), gpt_loss2 = gpt_inference(gpt_data,gpt,args)
 
                 all_log_probs_list.append(gpt_loss_array2)
+            
+        if last_loop_count > 0:
+            #GPT#########
+            history = batch_entry.context_as_text[0]
+            #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
+            worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
+            entries = make_gpt_input_json(history, responses[0], chart_responses[-last_loop_count:], worst_response)
+            gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
+            gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
+            gpt_loss_array2, (lm_loss_total,n_loss), gpt_loss2 = gpt_inference(gpt_data,gpt,args)
 
-            combined_gpt_loss_array = torch.cat(all_log_probs_list)
+            all_log_probs_list.append(gpt_loss_array2)
 
-            post_observation_belief_estimate = softmax(combined_gpt_loss_array)
-            # print(get_indexed_vector(post_observation_belief_estimate))
-            # print(np.argsort(gpt_loss_array.detach().cpu().numpy())[-1])
-            if np.argsort(combined_gpt_loss_array.detach().cpu().numpy())[-1] < N-Nf:
-                belief = post_observation_belief_estimate[:N-Nf]/torch.sum(post_observation_belief_estimate[:N-Nf])
+        combined_gpt_loss_array = torch.cat(all_log_probs_list)
+
+        post_observation_belief_estimate = softmax(combined_gpt_loss_array)
+        # print(get_indexed_vector(post_observation_belief_estimate))
+        # print(np.argsort(gpt_loss_array.detach().cpu().numpy())[-1])
+        if np.argsort(combined_gpt_loss_array.detach().cpu().numpy())[-1] < N-Nf:
+            belief = post_observation_belief_estimate[:N-Nf]/torch.sum(post_observation_belief_estimate[:N-Nf])
 
 
 
@@ -856,12 +602,12 @@ def create_output_entry_new(history,response,gt_index,output,top5_scores,startId
     
     # make sure this is sorted properly
 
-    if not args.classic:
-        # global T
-        # global old_belief
-        entry['old belief'] = [float(i) for i in old_belief]
-        entry['tpm'] = [[float(i) for i in row] for row in tpm]
-        entry['bT'] = [float(i) for i in torch.matmul(torch.transpose(tpm,0,1), old_belief)]
+    
+    # global T
+    # global old_belief
+    entry['old belief'] = [float(i) for i in old_belief]
+    entry['tpm'] = [[float(i) for i in row] for row in tpm]
+    entry['bT'] = [float(i) for i in torch.matmul(torch.transpose(tpm,0,1), old_belief)]
 
     ct_scores2 = copy.deepcopy(ct_scores)
     p_scores2 = copy.deepcopy(p_scores)
@@ -883,11 +629,6 @@ def create_output_entry_new(history,response,gt_index,output,top5_scores,startId
         ranked_topk.append({"rank":i+1,"response":chart_responses[idx],"probab":float(top5_scores[i]),"gpt ll":float(gpt_loss_array[i])})
     entry['ranked top 5']=ranked_topk
 
-    # ranked_topk = []
-    # top5_scores = top5_scores.cpu().numpy()
-    # for i, r in enumerate(top5):
-    #     ranked_topk.append({"rank":i+1,"response":r,"probab":float(top5_scores[i]),"gpt ll":float(gpt_loss_array[i])})
-    # entry['ranked top 5']=ranked_topk
     return entry
 
 def validate(data,startIdx, endIdx,sample=False):
@@ -933,25 +674,16 @@ def validate(data,startIdx, endIdx,sample=False):
 
     p_ai = softmax(-pred_scores_)
 
-    if args.classic:
-        c_t = p_ai
-    else:
-        T = node2all_tpm_new(data, val_scores_dict, startIdx, endIdx)
-        c_t = p_ai*(torch.matmul(torch.transpose(T,0,1), old_belief))
-        c_t = c_t/torch.sum(c_t)
-        # S = node2node_tpm(data, startIdx)
-        # U = transfer_wt_matrix(data, startIdx, old_belief)
-        # belief = (torch.matmul(torch.transpose(S, 0, 1), old_belief))*(torch.matmul(torch.transpose(U, 0, 1), p_ai))
-        # belief = belief/torch.sum(belief)
+    T = node2all_tpm_new(data, val_scores_dict, startIdx, endIdx)
+    c_t = p_ai*(torch.matmul(torch.transpose(T,0,1), old_belief))
+    c_t = c_t/torch.sum(c_t)
+
 
     topk_idxs = np.argsort(c_t.detach().cpu().numpy())[::-1][:args.scorer_topk]
     topk_idxs = topk_idxs.copy()
     pred_scores = c_t[list(topk_idxs)]
     pred_scores = pred_scores/torch.sum(pred_scores) 
-
-    # topk_idxs = np.argsort(pred_scores_.detach().cpu().numpy())[:args.scorer_topk]#fetch top k
-    # pred_scores = pred_scores_[list(topk_idxs)]
-    # pred_scores = softmax(-pred_scores)    
+   
 
     ##### NEW TOP K INDICES END
 
@@ -1002,81 +734,50 @@ def validate(data,startIdx, endIdx,sample=False):
     entry = create_output_entry_new(history,responses[0],gt_index,gpt_output,pred_scores,startIdx,correct_r1,correct_r5,old_correct_r1,old_correct_r5,gpt_loss_array,topk_idxs,classic_topk_idxs,chart_responses,c_t,p_ai,batch_entry.last_node[0],old_belief,T,N,Nf,data.flowchart_names[startIdx])
     avg_combined_loss = combined_loss.item()/response_length
 
-    # if startIdx in val_examples:
-    #     val_examples_count[startIdx]+=1
-    #     if val_examples_count[startIdx]%200 == 1:
-    #         print("---------------------------------------")
-    #         sys.stdout.flush()
-    #         print("Results for", startIdx, "at", val_examples_count[startIdx])
-    #         sys.stdout.flush()
-    #         print("Retriever Results")
-    #         sys.stdout.flush()
-    #         if old_belief is not None:
-    #             print('B(t-1):', old_belief)
-    #             sys.stdout.flush()
-    #             print('p_eta(z|h):', p_ai)
-    #             sys.stdout.flush()
-    #             print('C(t):',c_t)
-    #             sys.stdout.flush()
-    #             # print('normalized B(t):',normalized_b_1)
-    #             # sys.stdout.flush()
-    #         print("Belief idxs path scores:", pred_scores_[list(topk_idxs)])
-    #         sys.stdout.flush()
-    #         print("Classic idxs path scores:", pred_scores_[list(classic_topk_idxs)])
-    #         sys.stdout.flush()
-    #         print("GPT Results")
-    #         sys.stdout.flush()
-    #         print("Correct Response:", responses[0])
-    #         sys.stdout.flush()
-    #         print("GPT Output:", gpt_output)
-    #         sys.stdout.flush()
-    #         print("---------------------------------------")
-    #         sys.stdout.flush()
-
     if batch_entry.last_node[0] == True:
         belief = None
     else:
-        if args.gpt_correction:
+        
 
-            all_log_probs_list = []
+        all_log_probs_list = []
 
-            loop_count = N//5
-            last_loop_count = N%5
+        loop_count = N//5
+        last_loop_count = N%5
 
-            if loop_count > 0:
-                ranges = [i*5 for i in range(loop_count)]
+        if loop_count > 0:
+            ranges = [i*5 for i in range(loop_count)]
 
-                for range_begin in ranges:
-                    #GPT#########
-                    history = batch_entry.context_as_text[0]
-                    #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
-                    worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
-                    entries = make_gpt_input_json(history, responses[0], chart_responses[range_begin:range_begin+5], worst_response)
-                    gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
-                    gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
-                    gpt_loss_array, (lm_loss_total,n_loss), gpt_loss = gpt_inference(gpt_data,gpt,args)
-
-                    all_log_probs_list.append(gpt_loss_array)
-            
-            if last_loop_count > 0:
+            for range_begin in ranges:
                 #GPT#########
                 history = batch_entry.context_as_text[0]
                 #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
                 worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
-                entries = make_gpt_input_json(history, responses[0], chart_responses[-last_loop_count:], worst_response)
+                entries = make_gpt_input_json(history, responses[0], chart_responses[range_begin:range_begin+5], worst_response)
                 gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
                 gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
                 gpt_loss_array, (lm_loss_total,n_loss), gpt_loss = gpt_inference(gpt_data,gpt,args)
 
                 all_log_probs_list.append(gpt_loss_array)
+            
+        if last_loop_count > 0:
+            #GPT#########
+            history = batch_entry.context_as_text[0]
+            #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
+            worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
+            entries = make_gpt_input_json(history, responses[0], chart_responses[-last_loop_count:], worst_response)
+            gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
+            gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
+            gpt_loss_array, (lm_loss_total,n_loss), gpt_loss = gpt_inference(gpt_data,gpt,args)
 
-            combined_gpt_loss_array = torch.cat(all_log_probs_list)
+            all_log_probs_list.append(gpt_loss_array)
 
-            post_observation_belief_estimate = softmax(combined_gpt_loss_array)
-            # print(get_indexed_vector(post_observation_belief_estimate))
-            # print(np.argsort(gpt_loss_array.detach().cpu().numpy())[-1])
-            if np.argsort(combined_gpt_loss_array.detach().cpu().numpy())[-1] < N-Nf:
-                belief = post_observation_belief_estimate[:N-Nf]/torch.sum(post_observation_belief_estimate[:N-Nf])
+        combined_gpt_loss_array = torch.cat(all_log_probs_list)
+
+        post_observation_belief_estimate = softmax(combined_gpt_loss_array)
+        # print(get_indexed_vector(post_observation_belief_estimate))
+        # print(np.argsort(gpt_loss_array.detach().cpu().numpy())[-1])
+        if np.argsort(combined_gpt_loss_array.detach().cpu().numpy())[-1] < N-Nf:
+            belief = post_observation_belief_estimate[:N-Nf]/torch.sum(post_observation_belief_estimate[:N-Nf])
 
     
     return combined_loss, gpt_loss, ranking_info, bleu_input, entry, (lm_loss_total, n_loss), gpt_loss_top, avg_combined_loss
@@ -1125,25 +826,16 @@ def test(data,startIdx, endIdx,sample=False):
 
     p_ai = softmax(-pred_scores_)
 
-    if args.classic:
-        c_t = p_ai
-    else:
-        T = node2all_tpm_new(data, test_scores_dict, startIdx, endIdx)
-        c_t = p_ai*(torch.matmul(torch.transpose(T,0,1), old_belief))
-        c_t = c_t/torch.sum(c_t)
-        # S = node2node_tpm(data, startIdx)
-        # U = transfer_wt_matrix(data, startIdx, old_belief)
-        # belief = (torch.matmul(torch.transpose(S, 0, 1), old_belief))*(torch.matmul(torch.transpose(U, 0, 1), p_ai))
-        # belief = belief/torch.sum(belief)
+
+    T = node2all_tpm_new(data, test_scores_dict, startIdx, endIdx)
+    c_t = p_ai*(torch.matmul(torch.transpose(T,0,1), old_belief))
+    c_t = c_t/torch.sum(c_t)
     
     topk_idxs = np.argsort(c_t.detach().cpu().numpy())[::-1][:args.scorer_topk]
     topk_idxs = topk_idxs.copy()
     pred_scores = c_t[list(topk_idxs)]
     pred_scores = pred_scores/torch.sum(pred_scores) 
 
-    # topk_idxs = np.argsort(pred_scores_.detach().cpu().numpy())[:args.scorer_topk]#fetch top k
-    # pred_scores = pred_scores_[list(topk_idxs)]
-    # pred_scores = softmax(-pred_scores)
     
     ##### NEW TOP K INDICES END
 
@@ -1194,7 +886,51 @@ def test(data,startIdx, endIdx,sample=False):
     
     avg_combined_loss = combined_loss.item()/response_length
 
-    ##### SANITY CHECK
+    if batch_entry.last_node[0] == True:
+        belief = None
+    else:
+        all_log_probs_list = []
+
+        loop_count = N//5
+        last_loop_count = N%5
+
+        if loop_count > 0:
+            ranges = [i*5 for i in range(loop_count)]
+
+            for range_begin in ranges:
+                #GPT#########
+                history = batch_entry.context_as_text[0]
+                #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
+                worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
+                entries = make_gpt_input_json(history, responses[0], chart_responses[range_begin:range_begin+5], worst_response)
+                gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
+                gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
+                gpt_loss_array, (lm_loss_total,n_loss), gpt_loss = gpt_inference(gpt_data,gpt,args)
+
+                all_log_probs_list.append(gpt_loss_array)
+            
+        if last_loop_count > 0:
+            #GPT#########
+            history = batch_entry.context_as_text[0]
+            #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
+            worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
+            entries = make_gpt_input_json(history, responses[0], chart_responses[-last_loop_count:], worst_response)
+            gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
+            gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
+            gpt_loss_array, (lm_loss_total,n_loss), gpt_loss = gpt_inference(gpt_data,gpt,args)
+
+            all_log_probs_list.append(gpt_loss_array)
+
+        combined_gpt_loss_array = torch.cat(all_log_probs_list)
+
+        post_observation_belief_estimate = softmax(combined_gpt_loss_array)
+        # print(get_indexed_vector(post_observation_belief_estimate))
+        # print(np.argsort(gpt_loss_array.detach().cpu().numpy())[-1])
+        if np.argsort(combined_gpt_loss_array.detach().cpu().numpy())[-1] < N-Nf:
+            belief = post_observation_belief_estimate[:N-Nf]/torch.sum(post_observation_belief_estimate[:N-Nf])
+
+
+    ### SANITY CHECK
 
     if startIdx >= 0 and startIdx < 40000:
         print("---------------------------------------")
@@ -1224,114 +960,31 @@ def test(data,startIdx, endIdx,sample=False):
         sys.stdout.flush()
         print("c(t) sanity check")
         sys.stdout.flush()
-        if not args.classic:
-            print("p(z): ", get_indexed_vector(p_ai))
-            sys.stdout.flush()
-            print("b(i-1): ", get_indexed_vector(old_belief))
-            sys.stdout.flush()
-            # print("T: ", T)
-            # sys.stdout.flush()
-            print("b(i-1)T: ", get_indexed_vector(torch.matmul(torch.transpose(T,0,1), old_belief)))
-            sys.stdout.flush()
+        
+        print("p(z): ", get_indexed_vector(p_ai))
+        sys.stdout.flush()
+        print("b(i-1): ", get_indexed_vector(old_belief))
+        sys.stdout.flush()
+
+        print("b(i-1)T: ", get_indexed_vector(torch.matmul(torch.transpose(T,0,1), old_belief)))
+        sys.stdout.flush()
         print("c(t): ", get_indexed_vector(c_t))
         sys.stdout.flush() 
         print()
         sys.stdout.flush()
-        if not args.classic:
-            print("b(t) sanity check")
+
+        print("b(t) sanity check")
+        sys.stdout.flush()
+        print("b(i-1): ", get_indexed_vector(old_belief))
+        sys.stdout.flush()
+
+        print("p(z): ", get_indexed_vector(p_ai))
+        sys.stdout.flush()
+
+        if belief is not None:
+            print("b(i): ", get_indexed_vector(belief))
             sys.stdout.flush()
-            print("b(i-1): ", get_indexed_vector(old_belief))
-            sys.stdout.flush()
-            # print("S: ", S)
-            # sys.stdout.flush()
-            # print("b(i-1)S: ", get_indexed_vector(torch.matmul(torch.transpose(S, 0, 1), old_belief)))
-            # sys.stdout.flush()
-            print("p(z): ", get_indexed_vector(p_ai))
-            sys.stdout.flush()
-            # print("U: ", U)
-            # sys.stdout.flush()
-            # print("p(z)U: ", get_indexed_vector(torch.matmul(torch.transpose(U, 0, 1), p_ai)))
-            # sys.stdout.flush()
-            if belief is not None:
-                print("b(i): ", get_indexed_vector(belief))
-                sys.stdout.flush()
         torch.set_printoptions(profile="default")
-
-    # if startIdx in tst_examples:
-    #     tst_examples_count[startIdx]+=1
-    #     if tst_examples_count[startIdx]%200 == 1:
-    #         print("---------------------------------------")
-    #         sys.stdout.flush()
-    #         print("Results for", startIdx, "at", tst_examples_count[startIdx])
-    #         sys.stdout.flush()
-    #         print("Retriever Results")
-    #         sys.stdout.flush()
-    #         if old_belief is not None:
-    #             print('B(t-1):', old_belief)
-    #             sys.stdout.flush()
-    #             print('p_eta(z|h):', p_ai)
-    #             sys.stdout.flush()
-    #             print('C(t):', c_t)
-    #             sys.stdout.flush()
-    #             # print('normalized B(t):',normalized_b_1)
-    #             # sys.stdout.flush()
-    #         print("Belief idxs path scores:", pred_scores_[list(topk_idxs)])
-    #         sys.stdout.flush()
-    #         print("Classic idxs path scores:", pred_scores_[list(classic_topk_idxs)])
-    #         sys.stdout.flush()
-    #         print("GPT Results")
-    #         sys.stdout.flush()
-    #         print("Correct Response:", responses[0])
-    #         sys.stdout.flush()
-    #         print("GPT Output:", gpt_output)
-    #         sys.stdout.flush()
-    #         print("---------------------------------------")
-    #         sys.stdout.flush()
-
-    if batch_entry.last_node[0] == True:
-        belief = None
-    else:
-        if args.gpt_correction:
-
-            all_log_probs_list = []
-
-            loop_count = N//5
-            last_loop_count = N%5
-
-            if loop_count > 0:
-                ranges = [i*5 for i in range(loop_count)]
-
-                for range_begin in ranges:
-                    #GPT#########
-                    history = batch_entry.context_as_text[0]
-                    #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
-                    worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
-                    entries = make_gpt_input_json(history, responses[0], chart_responses[range_begin:range_begin+5], worst_response)
-                    gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
-                    gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
-                    gpt_loss_array, (lm_loss_total,n_loss), gpt_loss = gpt_inference(gpt_data,gpt,args)
-
-                    all_log_probs_list.append(gpt_loss_array)
-            
-            if last_loop_count > 0:
-                #GPT#########
-                history = batch_entry.context_as_text[0]
-                #worst_response = chart_responses[np.argsort(pred_scores_.detach().cpu().numpy())[-1]]
-                worst_response = chart_responses[np.argsort(c_t.detach().cpu().numpy())[0]]
-                entries = make_gpt_input_json(history, responses[0], chart_responses[-last_loop_count:], worst_response)
-                gpt_data_ = tokenize_for_gpt(entries, gpt_tokenizer)
-                gpt_data = convert_to_gpt_input(gpt_data_, args, gpt_tokenizer)
-                gpt_loss_array, (lm_loss_total,n_loss), gpt_loss = gpt_inference(gpt_data,gpt,args)
-
-                all_log_probs_list.append(gpt_loss_array)
-
-            combined_gpt_loss_array = torch.cat(all_log_probs_list)
-
-            post_observation_belief_estimate = softmax(combined_gpt_loss_array)
-            # print(get_indexed_vector(post_observation_belief_estimate))
-            # print(np.argsort(gpt_loss_array.detach().cpu().numpy())[-1])
-            if np.argsort(combined_gpt_loss_array.detach().cpu().numpy())[-1] < N-Nf:
-                belief = post_observation_belief_estimate[:N-Nf]/torch.sum(post_observation_belief_estimate[:N-Nf])
     
     return combined_loss, gpt_loss, ranking_info, bleu_input, entry, (lm_loss_total, n_loss), gpt_loss_top, avg_combined_loss
 
@@ -1385,7 +1038,9 @@ def initial_rank_stats(batches,data):
     avg_ppl = torch.exp(total_gpt_loss/len(batches)).cpu().numpy()
     avg_ppl_top = torch.exp(total_gpt_loss_top/len(batches)).cpu().numpy()
     comb_ppl = np.exp(total_combined_loss/len(batches))
-    return val_r_at1, val_r_at5, bleu, entries, ppl, avg_ppl, comb_ppl, avg_ppl_top
+    val_success_rate = success_rate(entries)
+    return val_r_at1, val_r_at5, val_success_rate, bleu, entries, ppl, avg_ppl, comb_ppl, avg_ppl_top
+
 
 def get_dialog_dict(data, batches):
 
@@ -1410,7 +1065,7 @@ def get_dialog_dict(data, batches):
 
 
 if __name__ == "__main__":
-    print("This is code updated on Jan 20\n")
+    
     sys.stdout.flush()
     args = parge_args()
     glob, trnData, valData, tstData, trn_batches, val_batches, tst_batches = get_dataset_and_batches()#one dialog utterance against complete chart
@@ -1447,44 +1102,10 @@ if __name__ == "__main__":
         internal_old_domain = 'outdomain/'
         internal_domain = 'U-Flo'
 
-    train_scores_dict = json.load(open('new_cached_nli_scores/' + internal_old_domain + args.nli_folder + internal_domain + '_train_score_cache.json','rb'))
-    val_scores_dict = json.load(open('new_cached_nli_scores/' + internal_old_domain + args.nli_folder + internal_domain + '_val_score_cache.json','rb'))
-    
-    # test_scores_dict = val_scores_dict
-    test_scores_dict = json.load(open('new_cached_nli_scores/' + internal_old_domain + args.nli_folder + internal_domain + '_test_score_cache.json','rb'))
+    train_scores_dict = json.load(open('cached_nli_scores/' + internal_old_domain + args.nli_folder + internal_domain + '_train_score_cache.json','rb'))
+    val_scores_dict = json.load(open('cached_nli_scores/' + internal_old_domain + args.nli_folder + internal_domain + '_val_score_cache.json','rb'))
+    test_scores_dict = json.load(open('cached_nli_scores/' + internal_old_domain + args.nli_folder + internal_domain + '_test_score_cache.json','rb'))
 
-
-    # UNCOMMENT for SMALL RUN + comment out initial_rank_stats and set num epochs = 1
-
-    # trn_batches = trn_batches[0:3]
-    # val_batches = val_batches[0:3]
-    # tst_batches = tst_batches[0:3]
-
-    # trn_examples = list(trn_batches_dict.keys())
-    # trn_examples.sort()
-    # trn_examples = trn_examples[0:5]
-    # trn_examples_count = {example:0 for example in trn_examples}
-
-    # val_examples = list(val_batches_dict.keys())
-    # val_examples.sort()
-    # val_examples = val_examples[0:5]
-    # val_examples_count = {example:0 for example in val_examples}
-
-    # tst_examples = list(tst_batches_dict.keys())
-    # tst_examples.sort()
-    # tst_examples = tst_examples[0:5]   
-    # tst_examples_count = {example:0 for example in tst_examples} 
-
-    # UNCOMMENT for FULL RUN
-
-    trn_examples = random.sample(list(trn_batches_dict.keys()),5)
-    trn_examples_count = {example:0 for example in trn_examples}
-
-    val_examples = random.sample(list(val_batches_dict.keys()),5)
-    val_examples_count = {example:0 for example in val_examples}
-
-    tst_examples = random.sample(list(tst_batches_dict.keys()),5)
-    tst_examples_count = {example:0 for example in tst_examples}
 
     ############
 
@@ -1520,7 +1141,7 @@ if __name__ == "__main__":
     sys.stdout.flush()
     #_, train_r_at5, _, _, _ = initial_rank_stats(trn_batches,trnData)
     #_, val_r_at5, val_bleu, _, _ = initial_rank_stats(val_batches,valData)
-    tst_r1, tst_r_at5, tst_bleu, entries, test_ppl, avg_ppl, comb_ppl, avg_ppl_top = initial_rank_stats(tst_batches,tstData)
+    tst_r1, tst_r_at5, tst_success_rate, tst_bleu, entries, test_ppl, avg_ppl, comb_ppl, avg_ppl_top = initial_rank_stats(tst_batches,tstData)
     r_at_5_array.append([0, np.nan, np.nan])
     r_at_1_array.append([0, np.nan, np.nan])
     val_bleu_array.append([0,np.nan,np.nan])
@@ -1528,7 +1149,7 @@ if __name__ == "__main__":
     test_r_at_1_array.append([0,tst_r1])  
     test_r_at_5_array.append([0,tst_r_at5])  
 
-    print("Test BLEU:",tst_bleu,", Test R@1:",tst_r1,", Test R@5:",tst_r_at5, "Test PPL:",test_ppl, "Average Test PPL:", avg_ppl, "Combined Test PPL:", comb_ppl, "Combined Test PPL:", avg_ppl_top)
+    print("Test BLEU:",tst_bleu,", Test R@1:",tst_r1,", Test R@5:",tst_r_at5, "Test SR:", tst_success_rate, "Test PPL:",test_ppl, "Average Test PPL:", avg_ppl, "Combined Test PPL:", comb_ppl, "Combined Test PPL:", avg_ppl_top)
     #print("Test BLEU:",tst_bleu,"Test R@1:",tst_r1,"Test R@5:",tst_r_at5, "Combined Test PPL:", comb_ppl)
     with open(args.test_output_path.replace(".json",str(-1)+".json"),"w") as f:
         json.dump(entries,f, indent=4)
@@ -1653,11 +1274,13 @@ if __name__ == "__main__":
             top_ppl_test = torch.exp(total_top_loss_test/len(tst_batches)).cpu().numpy()
             comb_ppl_test = np.exp(test_avg_combined_loss)
 
-            print('Test Scores\n', "Epoch: {0:.1f}".format(float(epoch+1)), "Combined Loss: {0:.3f}".format(test_combined_loss), "Test BLEU: {0:.4f}".format(test_bleu), "R@1:{0:.4f}".format(test_r_at1), "R@5:{0:.4f}".format(test_r_at5), "PPL:{0:.5f}".format(test_ppl), "AVG PPL:{0:.5f}".format(avg_ppl_test), "AVG PPL:{0:.5f}".format(top_ppl_test), "AVG COMBINED PPL:{0:.5f}".format(comb_ppl_test), "Time: {0:.3f}".format(t1-t0))
+            test_success_rate = success_rate(test_entries)
+
+            print('Test Scores\n', "Epoch: {0:.1f}".format(float(epoch+1)), "Combined Loss: {0:.3f}".format(test_combined_loss), "Test BLEU: {0:.4f}".format(test_bleu), "R@1:{0:.4f}".format(test_r_at1), "R@5:{0:.4f}".format(test_r_at5), "SR:{0:.4f}".format(test_success_rate), "PPL:{0:.5f}".format(test_ppl), "AVG PPL:{0:.5f}".format(avg_ppl_test), "AVG PPL:{0:.5f}".format(top_ppl_test), "AVG COMBINED PPL:{0:.5f}".format(comb_ppl_test), "Time: {0:.3f}".format(t1-t0))
             sys.stdout.flush()
             
             with io.open(args.metric_path, 'w', encoding='utf8') as f:
-                f.write("Epoch:{:.0f}, Loss {:.3f}, GPT Loss {:.3f}, Vcombined_loss {:.3f}, VGPT_BLEU {:.2f}, Test Combined Loss:{:.5f}, Test BLEU:{:.5f}, R@1:{:.3f}, R@5:{:.3f}, PPL:{:.4f}, AVG PPL:{:.4f}, AVG TOP PPL:{:.4f}, AVG combined PPL:{:.4f}".format(epoch+1, combined_loss, gpt_loss, vcombined_loss, val_bleu*100,test_combined_loss,test_bleu, test_r_at1, test_r_at5, test_ppl, avg_ppl_test, top_ppl_test, comb_ppl_test))
+                f.write("Epoch:{:.0f}, Loss {:.3f}, GPT Loss {:.3f}, Vcombined_loss {:.3f}, VGPT_BLEU {:.2f}, Test Combined Loss:{:.5f}, Test BLEU:{:.5f}, R@1:{:.3f}, R@5:{:.3f}, SR:{:.3f}, PPL:{:.4f}, AVG PPL:{:.4f}, AVG TOP PPL:{:.4f}, AVG combined PPL:{:.4f}".format(epoch+1, combined_loss, gpt_loss, vcombined_loss, val_bleu*100,test_combined_loss,test_bleu, test_r_at1, test_r_at5, test_success_rate, test_ppl, avg_ppl_test, top_ppl_test, comb_ppl_test))
             
             # with io.open(args.ranks_data_save_path,"wb") as f:
             #     pickle.dump({'train':train_ranking_info,'valid':val_ranking_info,'test':test_ranking_info},f)
