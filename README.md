@@ -44,7 +44,7 @@ The retriever and generator output along with ground truth annotations for each 
 
 1. Clone this repo
 2. Set up a Python environment using requirements.txt (we use Python 3.6 for all our experiments)
-3. Download [pre-trained glove embeddings](https://nlp.stanford.edu/data/glove.6B.zip) and unzip them to code/glove6B/ (skip if already done)
+3. Download [pre-trained glove embeddings](https://nlp.stanford.edu/data/glove.6B.zip) and unzip them to code/glove6B/
 4. The [link]([link](https://drive.google.com/drive/folders/1-jzJJXG34RR581-0yY5u9ZDKCm6U-z0l?usp=sharing)) contains the pre-trained retriever and generator for both settings that are used for training SA-FloNet. Download and move them to data/model/
 5. Run the training script with the following commands (training time for both settings = 32 hours).
 
