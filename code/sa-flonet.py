@@ -1149,8 +1149,8 @@ if __name__ == "__main__":
     test_r_at_1_array.append([0,tst_r1])  
     test_r_at_5_array.append([0,tst_r_at5])  
 
-    print("Test BLEU:",tst_bleu,", Test R@1:",tst_r1,", Test R@5:",tst_r_at5, "Test SR:", tst_success_rate, "Test PPL:",test_ppl, "Average Test PPL:", avg_ppl, "Combined Test PPL:", comb_ppl, "Combined Test PPL:", avg_ppl_top)
-    #print("Test BLEU:",tst_bleu,"Test R@1:",tst_r1,"Test R@5:",tst_r_at5, "Combined Test PPL:", comb_ppl)
+    # print("Test BLEU:",tst_bleu,", Test R@1:",tst_r1,", Test R@5:",tst_r_at5, "Test SR:", tst_success_rate, "Test PPL:",test_ppl, "Average Test PPL:", avg_ppl, "Combined Test PPL:", comb_ppl, "Combined Test PPL:", avg_ppl_top)
+    print("Test BLEU:",tst_bleu,"Test R@1:",tst_r1,"Test R@5:",tst_r_at5, "Test SR:", tst_success_rate, "Combined Test PPL:", comb_ppl)
     with open(args.test_output_path.replace(".json",str(-1)+".json"),"w") as f:
         json.dump(entries,f, indent=4)
     print("start training#########")
