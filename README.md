@@ -169,4 +169,4 @@ python run_snli_predict_scores.py \
 
 6. Copy the score_only.json files into the directory for this repo in an appropriate subfolder in code/cached-nli-scores/. Make sure to give the subfolder in both domains the same name. Modify the convert_scores_to_cached_dicts.py script by changing the paths as appropriate and run it every domain and split. The necessary dicts will be generated and saved in json files.
 
-7. Modify the ```nli-folder``` parameter to the name of the subfolder for your newly generated cached scores in the previous step. SA-FloNet will use the scores of the new fine-tuned model. Run SA-FloNet with other parameters as described above.
+7. In the SA-FloNet training and evaluation scripts, modify the ```nli-folder``` parameter to the name of the subfolder for your newly generated cached scores in the previous step. SA-FloNet will use the scores of the new fine-tuned model. Run SA-FloNet with other parameters as described above.
